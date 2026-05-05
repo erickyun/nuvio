@@ -1,15 +1,9 @@
 // ============================================================
-//  CizgiMax — Nuvio Provider (v3)
-//  Gerçek akış (Network loglarından doğrulandı):
-//  1. /ajaxservice/index.php?qr= → dizi slug'ı bul
-//  2. Dizi sayfasından bölüm URL'leri çek (statik HTML'de mevcut)
-//  3. Bölüm sayfasından cizgipass embed URL'ini bul (AJAX değil, sayfada var)
-//  4. cizgipass100.online/embed/ID → bePlayer("PASS","{"ct","iv","s"}") → AES decrypt → video_location (/list/BASE64)
-//  5. /list/BASE64 → master m3u8 → oynat
+//  CizgiMax — Nuvio Provider
 // ============================================================
 
 var MAIN_URL     = 'https://cizgimax.online';
-var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
+var TMDB_API_KEY = '500330721680edb6d5f7f12ba7cd9023';
 
 var HEADERS = {
   'User-Agent':      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
@@ -63,10 +57,8 @@ function searchCizgiMax(query) {
   })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      var items = (data.data || {}).result || [];
-      // Sadece ana dizi sayfalarını al, bölüm/sezon satırlarını filtrele
-      return items.filter(function(item) {
-        return !/(\.Bölüm|\.Sezon|-Sezon|-izle\s*\d)/i.test(item.s_name || '');
+      return ((data.data || {}).result || []).filter(function(item) {
+        return !/(\.Bölüm|\.Sezon|-Sezon)/i.test(item.s_name || '');
       });
     })
     .catch(function() { return []; });
@@ -84,109 +76,105 @@ function findBestMatch(items, titleEn, titleTr) {
   var scored = items.map(function(item) {
     var n = normalize(item.s_name || '');
     var s = 0;
-    if (n === nEn || n === nTr)                                    s = 100;
-    else if (n.indexOf(nEn) !== -1 || nEn.indexOf(n) !== -1)      s = 70;
-    else if (n.indexOf(nTr) !== -1 || nTr.indexOf(n) !== -1)      s = 70;
+    if (n === nEn || n === nTr)                               s = 100;
+    else if (n.indexOf(nEn) !== -1 || nEn.indexOf(n) !== -1) s = 70;
+    else if (n.indexOf(nTr) !== -1 || nTr.indexOf(n) !== -1) s = 70;
     return { item: item, score: s };
   });
   scored.sort(function(a, b) { return b.score - a.score; });
   return (scored.length && scored[0].score >= 60) ? scored[0].item : null;
 }
 
-// ── Bölüm URL'i oluştur ───────────────────────────────────────
-// CizgiMax bölüm URL yapısı iki formatta olabiliyor:
-//   /dizi-slug-X-sezon-Y-bolum-izle/   (eski)
-//   /dizi-adi-X-sezon-Y-bolum/          (yeni, Türkçe başlıkla)
-// Dizi sayfasından parse etmek en güvenilir yol.
-
-function extractSeasonEpisode(text) {
+// ── Sezon/Bölüm parse ─────────────────────────────────────────
+// URL'den çıkar: /big-city-greens-1-sezon-2-bolum-izle/ → {season:1, episode:2}
+function extractSeasonEpisodeFromUrl(url) {
   var s = 1, e = 1;
-  var sm = text.match(/(\d+)\s*\.?\s*[Ss]ezon/i);
-  var em = text.match(/(\d+)\s*\.?\s*[Bb]ölüm/i)
-        || text.match(/[Bb]ölüm\s*(\d+)/i);
+  var sm = url.match(/-(\d+)-sezon-/i);
+  var em = url.match(/-sezon-(\d+)-bolum/i);
   if (sm) s = parseInt(sm[1]);
   if (em) e = parseInt(em[1]);
   return { season: s, episode: e };
 }
 
-// Dizi sayfasından tüm bölüm linklerini çek
-// Gerçek HTML'de: <a href="/big-city-greens-1-sezon-1-bolum-izle/"> gibi linkler var
+// ── Dizi sayfasından bölüm linkleri ──────────────────────────
+// MHT'den doğrulandı: <a href="..." class="episode-link episode-list">
 function fetchShowEpisodes(showUrl) {
   return getHtml(showUrl).then(function(html) {
     var episodes = [];
-
-    // Bölüm linkleri: <a href="..."> içinde sezon/bölüm bilgisi geçenler
-    // Gerçek CizgiMax HTML'inde bölümler şöyle listeleniyor:
-    // <a href="/slug-X-sezon-Y-bolum-izle/">  veya /slug-X-sezon-Y-bolum/
-    var re = /href="(https?:\/\/cizgimax\.online\/[^"]*(?:sezon|bolum)[^"]*|\/[^"]*(?:sezon|bolum)[^"]*)"/gi;
-    var seen = {};
+    // class="episode-link episode-list" olan tüm a etiketleri
+    var re = /<a[^>]+href="([^"]+)"[^>]*class="[^"]*episode-link[^"]*"[^>]*>/gi;
     var m;
     while ((m = re.exec(html)) !== null) {
-      var href = m[1].indexOf('http') === 0 ? m[1] : fixUrl(m[1]);
-      if (seen[href]) continue;
-      seen[href] = true;
-
-      // URL'den sezon/bölüm çıkar
-      var se = extractSeasonEpisode(href);
+      var href = fixUrl(m[1]);
+      var se   = extractSeasonEpisodeFromUrl(href);
       if (se.episode > 0) {
         episodes.push({ season: se.season, episode: se.episode, url: href });
       }
     }
 
+    // Alternatif: class sırası farklı olabilir
+    if (!episodes.length) {
+      var re2 = /<a[^>]+class="[^"]*episode-link[^"]*"[^>]+href="([^"]+)"[^>]*>/gi;
+      while ((m = re2.exec(html)) !== null) {
+        var href = fixUrl(m[1]);
+        var se   = extractSeasonEpisodeFromUrl(href);
+        if (se.episode > 0) {
+          episodes.push({ season: se.season, episode: se.episode, url: href });
+        }
+      }
+    }
+
+    console.log('[CizgiMax] Bölüm listesi: ' + episodes.length + ' bölüm');
     return episodes;
   });
 }
 
-// ── Bölüm sayfasından cizgipass embed URL'ini al ──────────────
-// Gerçek bölüm sayfasında player direkt HTML'de var ama
-// "CIZGIMAX+" üyelik duvarı arkasında olabilir.
-// data-frame veya iframe src olarak cizgipass URL'i bulunur.
+// ── Bölüm sayfasından CizgiPass embed URL'i al ───────────────
+// MHT'den doğrulandı:
+// <ul class="linkler"><li class="belink">
+//   <a data-frame="https://cizgipass100.online/embed/x35d3MeRBvrsirQ" class="post-page-numbers">CIZGIMAX+</a>
+// </li></ul>
 function fetchCizgipassUrl(epUrl) {
   return getHtml(epUrl, { 'Referer': MAIN_URL + '/' }).then(function(html) {
-    // 1. data-frame attribute'u ile
-    var m = html.match(/data-frame="(https?:\/\/cizgipass[^"]+)"/i);
+    // 1. ul.linkler içinde data-frame (doğrulanmış yapı)
+    var m = html.match(/class="linkler"[\s\S]{0,500}?data-frame="(https?:\/\/cizgipass[^"]+)"/i);
     if (m) return m[1];
 
-    // 2. iframe src ile
+    // 2. Herhangi bir data-frame ile cizgipass URL'i
+    m = html.match(/data-frame="(https?:\/\/cizgipass[^"]+)"/i);
+    if (m) return m[1];
+
+    // 3. iframe src ile
     m = html.match(/<iframe[^>]+src="(https?:\/\/cizgipass[^"]+)"/i);
     if (m) return m[1];
 
-    // 3. Herhangi bir cizgipass URL'i
+    // 4. Herhangi bir cizgipass embed URL'i
     m = html.match(/(https?:\/\/cizgipass\d*\.online\/embed\/[a-zA-Z0-9]+)/i);
-    if (m) return m[1];
-
-    // 4. data-src ile (lazy load)
-    m = html.match(/data-src="(https?:\/\/cizgipass[^"]+)"/i);
     if (m) return m[1];
 
     return null;
   });
 }
 
-// ── MD5 implementasyonu (crypto.subtle MD5 desteklemez) ───────
+// ── MD5 (crypto.subtle MD5 desteklemediği için) ───────────────
 function md5(data) {
-  function safeAdd(x, y) {
-    var l = (x & 0xFFFF) + (y & 0xFFFF);
-    return ((x >> 16) + (y >> 16) + (l >> 16)) << 16 | (l & 0xFFFF);
-  }
-  function rol(n, s) { return n << s | n >>> (32 - s); }
-  function cmn(q, a, b, x, s, t) { return safeAdd(rol(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b); }
-  function ff(a,b,c,d,x,s,t) { return cmn((b&c)|(~b&d),a,b,x,s,t); }
-  function gg(a,b,c,d,x,s,t) { return cmn((b&d)|(c&~d),a,b,x,s,t); }
-  function hh(a,b,c,d,x,s,t) { return cmn(b^c^d,a,b,x,s,t); }
-  function ii(a,b,c,d,x,s,t) { return cmn(c^(b|~d),a,b,x,s,t); }
+  function sa(x,y){var l=(x&0xFFFF)+(y&0xFFFF);return((x>>16)+(y>>16)+(l>>16))<<16|(l&0xFFFF);}
+  function rol(n,s){return n<<s|n>>>(32-s);}
+  function cmn(q,a,b,x,s,t){return sa(rol(sa(sa(a,q),sa(x,t)),s),b);}
+  function ff(a,b,c,d,x,s,t){return cmn((b&c)|(~b&d),a,b,x,s,t);}
+  function gg(a,b,c,d,x,s,t){return cmn((b&d)|(c&~d),a,b,x,s,t);}
+  function hh(a,b,c,d,x,s,t){return cmn(b^c^d,a,b,x,s,t);}
+  function ii(a,b,c,d,x,s,t){return cmn(c^(b|~d),a,b,x,s,t);}
 
-  var bytes = data;
-  var len   = bytes.length;
-  var words = new Array(len >> 2);
-  for (var i = 0; i < words.length; i++) words[i] = 0;
-  for (var i = 0; i < len; i++) words[i >> 2] |= bytes[i] << (i % 4 * 8);
-  words[len >> 2] |= 0x80 << (len % 4 * 8);
-  words[((len + 72 >> 6) << 4) + 14] = len * 8;
+  var len=data.length, words=[];
+  for(var i=0;i<(len>>2)+4;i++) words[i]=0;
+  for(var i=0;i<len;i++) words[i>>2]|=data[i]<<(i%4*8);
+  words[len>>2]|=0x80<<(len%4*8);
+  words[((len+72>>6)<<4)+14]=len*8;
 
-  var a = 0x67452301, b = 0xEFCDAB89, c = 0x98BADCFE, d = 0x10325476;
-  for (var i = 0; i < words.length; i += 16) {
-    var A=a, B=b, C=c, D=d;
+  var a=0x67452301,b=0xEFCDAB89,c=0x98BADCFE,d=0x10325476;
+  for(var i=0;i<words.length;i+=16){
+    var A=a,B=b,C=c,D=d;
     a=ff(a,b,c,d,words[i+0],7,-680876936);    b=ff(d,a,b,c,words[i+1],12,-389564586);
     c=ff(c,d,a,b,words[i+2],17,606105819);    d=ff(b,c,d,a,words[i+3],22,-1044525330);
     a=ff(a,b,c,d,words[i+4],7,-176418897);    b=ff(d,a,b,c,words[i+5],12,1200080426);
@@ -219,62 +207,47 @@ function md5(data) {
     c=ii(c,d,a,b,words[i+6],15,-1560198380);  d=ii(b,c,d,a,words[i+13],21,1309151649);
     a=ii(a,b,c,d,words[i+4],6,-145523070);    b=ii(d,a,b,c,words[i+11],10,-1120210379);
     c=ii(c,d,a,b,words[i+2],15,718787259);    d=ii(b,c,d,a,words[i+9],21,-343485551);
-    a=safeAdd(a,A); b=safeAdd(b,B); c=safeAdd(c,C); d=safeAdd(d,D);
+    a=sa(a,A);b=sa(b,B);c=sa(c,C);d=sa(d,D);
   }
-  var out = new Uint8Array(16);
-  for (var i = 0; i < 4; i++) {
-    out[i]    = (a >> i*8) & 0xFF;
-    out[i+4]  = (b >> i*8) & 0xFF;
-    out[i+8]  = (c >> i*8) & 0xFF;
-    out[i+12] = (d >> i*8) & 0xFF;
-  }
+  var out=new Uint8Array(16);
+  for(var i=0;i<4;i++){out[i]=(a>>i*8)&0xFF;out[i+4]=(b>>i*8)&0xFF;out[i+8]=(c>>i*8)&0xFF;out[i+12]=(d>>i*8)&0xFF;}
   return out;
 }
 
 // ── OpenSSL EVP_BytesToKey ────────────────────────────────────
-// CryptoJS.AES şifrelemenin kullandığı key türetme algoritması
 function evpBytesToKey(password, salt) {
   var p = new TextEncoder().encode(password);
   var s = salt || new Uint8Array(0);
-
-  function cat() {
-    var args = Array.prototype.slice.call(arguments);
-    var len  = 0; args.forEach(function(a){ len += a.length; });
-    var out  = new Uint8Array(len), off = 0;
-    args.forEach(function(a){ out.set(a, off); off += a.length; });
+  function cat(){
+    var args=Array.prototype.slice.call(arguments),len=0;
+    args.forEach(function(a){len+=a.length;});
+    var out=new Uint8Array(len),off=0;
+    args.forEach(function(a){out.set(a,off);off+=a.length;});
     return out;
   }
-
-  var d0 = md5(cat(p, s));
-  var d1 = md5(cat(d0, p, s));
-  var d2 = md5(cat(d1, p, s));
-
-  return {
-    key: cat(d0, d1),   // 32 byte
-    iv:  d2.slice(0,16) // 16 byte
-  };
+  var d0=md5(cat(p,s));
+  var d1=md5(cat(d0,p,s));
+  var d2=md5(cat(d1,p,s));
+  return { key: cat(d0,d1), iv: d2.slice(0,16) };
 }
 
 // ── BePlayer AES-256-CBC Decrypt ─────────────────────────────
-// Network'te görülen format: {"ct":"BASE64","iv":"HEX","s":"HEX"}
-// s  = salt (hex, 8 byte)
-// iv = initialization vector (hex, 16 byte)
-// ct = ciphertext (base64)
+// Network'ten doğrulanan format: {"ct":"BASE64","iv":"HEX32","s":"HEX16"}
 function bePlayerDecrypt(password, encryptedJson) {
   var parsed;
   try { parsed = JSON.parse(encryptedJson); }
-  catch(e) { return Promise.reject(new Error('JSON parse hatası')); }
+  catch(e) { return Promise.reject(new Error('JSON parse hatası: ' + e.message)); }
 
-  // ct: base64 → bytes
+  // ct → bytes
   var ctRaw = atob(parsed.ct);
   var ct    = new Uint8Array(ctRaw.length);
   for (var i = 0; i < ctRaw.length; i++) ct[i] = ctRaw.charCodeAt(i);
 
-  // iv: hex → bytes
+  // iv → bytes (hex)
   var iv = new Uint8Array(16);
   for (var i = 0; i < 16; i++) iv[i] = parseInt(parsed.iv.slice(i*2, i*2+2), 16);
 
-  // s (salt): hex → bytes  — EVP ile key türet
+  // salt → bytes (hex, 8 byte) + EVP ile key türet
   var salt = new Uint8Array(8);
   if (parsed.s) {
     for (var i = 0; i < 8; i++) salt[i] = parseInt(parsed.s.slice(i*2, i*2+2), 16);
@@ -288,47 +261,32 @@ function bePlayerDecrypt(password, encryptedJson) {
     })
     .then(function(buf) {
       var bytes = new Uint8Array(buf);
-      // PKCS7 padding kaldır
-      var pad = bytes[bytes.length - 1];
+      var pad   = bytes[bytes.length - 1];
       if (pad > 0 && pad <= 16) bytes = bytes.slice(0, bytes.length - pad);
       return new TextDecoder().decode(bytes);
     });
 }
 
-// ── CizgiPass embed'den video URL'i çek ───────────────────────
-// Network logu doğruladı:
-//   1. GET cizgipass100.online/embed/ID → HTML içinde bePlayer("pass","{"ct","iv","s"}")
-//   2. Decrypt → JSON → video_location = "https://cizgipass100.online/list/BASE64"
-//   3. GET /list/BASE64 → master m3u8 (zaten orada, ekstra istek gerekmez)
+// ── CizgiPass embed'den stream çek ───────────────────────────
 function extractFromCizgipass(embedUrl) {
   var label = '⌜ CİZGİMAX ⌟';
 
   return fetch(embedUrl, {
     headers: Object.assign({}, HEADERS, {
-      'Referer':          MAIN_URL + '/',
-      'sec-fetch-dest':   'iframe',
-      'sec-fetch-mode':   'navigate',
-      'sec-fetch-site':   'cross-site'
+      'Referer':        MAIN_URL + '/',
+      'sec-fetch-dest': 'iframe',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'cross-site'
     })
   })
     .then(function(r) { return r.text(); })
     .then(function(html) {
-      // bePlayer("PASS", '{"ct":"...","iv":"...","s":"..."}')
-      // BEPLAYER_REGEX = r"bePlayer\(['\"](.*?)['\"],\s*['\"](.*?)['\"]\);"
-      var m = html.match(/bePlayer\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"](\{[^'"\\]*(?:\\.[^'"\\]*)*\})['"]\s*\)/);
-      if (!m) {
-        // Alternatif: tırnak kaçış karakterleri farklı olabilir
-        m = html.match(/bePlayer\s*\(\s*'([^']+)'\s*,\s*'(\{.+?\})'\s*\)/s)
-         || html.match(/bePlayer\s*\(\s*"([^"]+)"\s*,\s*"(\{.+?\})"\s*\)/s);
-      }
+      // bePlayer('PASS', '{"ct":"...","iv":"...","s":"..."}')
+      var m = html.match(/bePlayer\s*\(\s*'([^']+)'\s*,\s*'(\{[^']+\})'\s*\)/)
+           || html.match(/bePlayer\s*\(\s*"([^"]+)"\s*,\s*"(\{[^"]+\})"\s*\)/);
 
       if (!m) {
         console.log('[CizgiMax] bePlayer bulunamadı: ' + embedUrl);
-        // Fallback: direkt file: ara
-        var fm = html.match(/file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)['"]/i);
-        if (fm) return { url: fm[1], name: label, title: label,
-                         quality: 'Auto', type: 'hls',
-                         headers: { 'Referer': embedUrl } };
         return null;
       }
 
@@ -338,43 +296,29 @@ function extractFromCizgipass(embedUrl) {
 
       return bePlayerDecrypt(pass, enc)
         .then(function(decrypted) {
-          console.log('[CizgiMax] Decrypt sonucu:', decrypted.slice(0, 100));
-
           var videoUrl = null;
           var subs     = [];
 
           try {
             var data = JSON.parse(decrypted);
-            // video_location: "/list/BASE64" veya tam URL
             videoUrl = data.video_location
-              || (data.schedule && data.schedule.client &&
-                  reFind(String(data.schedule.client), /"video_location":"([^"]+)"/))
-              || data.file
-              || data.src;
+              || (data.schedule && reFind(String(data.schedule.client || ''), /"video_location":"([^"]+)"/))
+              || data.file || data.src;
 
-            // Altyazılar
             (data.strSubtitles || []).forEach(function(sub) {
               if (sub.file && sub.label && sub.label.indexOf('Forced') === -1)
                 subs.push({ label: sub.label.toUpperCase(), url: sub.file });
             });
-
           } catch(e) {
-            // JSON değilse direkt URL dene
-            var um = decrypted.match(/"video_location"\s*:\s*"([^"]+)"/);
-            if (um) videoUrl = um[1];
+            videoUrl = reFind(decrypted, /"video_location"\s*:\s*"([^"]+)"/);
           }
 
-          if (!videoUrl) {
-            console.log('[CizgiMax] video_location bulunamadı');
-            return null;
-          }
+          if (!videoUrl) { console.log('[CizgiMax] video_location yok'); return null; }
 
-          // /list/BASE64 → tam URL yap
-          if (videoUrl.startsWith('/')) {
-            videoUrl = 'https://cizgipass100.online' + videoUrl;
-          }
+          // /list/BASE64 → tam URL
+          if (videoUrl.startsWith('/')) videoUrl = 'https://cizgipass100.online' + videoUrl;
 
-          console.log('[CizgiMax] Video URL: ' + videoUrl.slice(0, 80));
+          console.log('[CizgiMax] ✓ Stream: ' + videoUrl.slice(0, 60) + '...');
 
           return {
             url:       videoUrl,
@@ -382,19 +326,13 @@ function extractFromCizgipass(embedUrl) {
             title:     label + (subs.length ? ' | ' + subs.map(function(s){ return s.label; }).join('/') : ''),
             quality:   'Auto',
             type:      'hls',
-            headers:   { 'Referer': embedUrl },
+            headers:   { 'Referer': 'https://cizgipass100.online/' },
             subtitles: subs
           };
         })
-        .catch(function(e) {
-          console.error('[CizgiMax] Decrypt hata:', e.message);
-          return null;
-        });
+        .catch(function(e) { console.error('[CizgiMax] Decrypt:', e.message); return null; });
     })
-    .catch(function(e) {
-      console.error('[CizgiMax] CizgiPass fetch hata:', e.message);
-      return null;
-    });
+    .catch(function(e) { console.error('[CizgiMax] Embed fetch:', e.message); return null; });
 }
 
 // ── Ana fonksiyon ─────────────────────────────────────────────
@@ -408,9 +346,8 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   return fetchTmdbInfo(tmdbId)
     .then(function(info) {
       if (!info.titleEn && !info.titleTr) return [];
-      console.log('[CizgiMax] Aranan: "' + info.titleEn + '" / "' + info.titleTr + '"');
+      console.log('[CizgiMax] "' + info.titleEn + '" / "' + info.titleTr + '"');
 
-      // 1. Dizi sayfasını bul
       return searchCizgiMax(info.titleEn || info.titleTr)
         .then(function(results) {
           var best = findBestMatch(results, info.titleEn, info.titleTr);
@@ -422,29 +359,23 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
           return best;
         })
         .then(function(best) {
-          if (!best) {
-            console.log('[CizgiMax] Dizi bulunamadı');
-            return [];
-          }
+          if (!best) { console.log('[CizgiMax] Dizi bulunamadı'); return []; }
 
           var showUrl = best.s_link
             ? (best.s_link.startsWith('http') ? best.s_link : fixUrl(best.s_link))
             : null;
-
           if (!showUrl) return [];
+
           console.log('[CizgiMax] Dizi: ' + best.s_name + ' → ' + showUrl);
 
-          // 2. Bölüm listesi
           return fetchShowEpisodes(showUrl)
             .then(function(episodes) {
-              console.log('[CizgiMax] ' + episodes.length + ' bölüm bulundu');
-
-              // Sezon+bölüm eşleşmesi
+              // Sezon + bölüm eşleşmesi
               var matched = episodes.filter(function(ep) {
                 return ep.season === sNum && ep.episode === eNum;
               });
-              // Bulunamazsa sadece bölüm numarasıyla dene
-              if (!matched.length && sNum === 1) {
+              // Sezon bulunamazsa sadece bölüm numarasıyla dene
+              if (!matched.length) {
                 matched = episodes.filter(function(ep) { return ep.episode === eNum; });
               }
               if (!matched.length) {
@@ -453,28 +384,23 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
               }
 
               var epUrl = matched[0].url;
-              console.log('[CizgiMax] Bölüm: ' + epUrl);
+              console.log('[CizgiMax] Bölüm sayfası: ' + epUrl);
 
-              // 3. Bölüm sayfasından cizgipass embed URL'ini al
               return fetchCizgipassUrl(epUrl)
                 .then(function(embedUrl) {
                   if (!embedUrl) {
-                    console.log('[CizgiMax] CizgiPass embed URL bulunamadı: ' + epUrl);
+                    console.log('[CizgiMax] Embed URL bulunamadı');
                     return [];
                   }
                   console.log('[CizgiMax] Embed: ' + embedUrl);
-
-                  // 4. bePlayer decrypt → video URL
                   return extractFromCizgipass(embedUrl)
-                    .then(function(stream) {
-                      return stream ? [stream] : [];
-                    });
+                    .then(function(stream) { return stream ? [stream] : []; });
                 });
             });
         });
     })
     .then(function(streams) {
-      console.log('[CizgiMax] Sonuç: ' + streams.length + ' stream');
+      console.log('[CizgiMax] Toplam stream: ' + streams.length);
       return streams;
     })
     .catch(function(err) {
@@ -488,4 +414,4 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { getStreams: getStreams };
 } else {
   global.getStreams = getStreams;
-                                                                  }
+        }
