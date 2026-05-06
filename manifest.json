@@ -1,6 +1,6 @@
 {
   "name": "Erenxyz",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "scrapers": [
     {
       "id": "filmmodu",
@@ -109,15 +109,16 @@
       "disabledPlatforms": []
     },
         {
-      "id": "filmmakinesi",
-      "name": "Filmmakinesi",
+      "id": "dizipal",
+      "name": "dizipal",
       "description": "Türkçe altyazılı ve dublaj yabancı diziler.",
       "version": "1.0.0",
       "author": "port: @keyiflerolsun / nuvio: Wekmed",
       "supportedTypes": [
-        "movie"
+        "movie",
+        "tv"
       ],
-      "filename": "providers/filmmakinesi.js",
+      "filename": "providers/dizilla.js",
       "enabled": true,
       "contentLanguage": [
         "tr"
