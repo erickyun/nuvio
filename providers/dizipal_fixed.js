@@ -1,281 +1,226 @@
-// DiziPal — Nuvio Provider (Güncellenmiş ve Onarılmış Sürüm)
-
+// DiziPal Provider — Son Yapıya Uygun Tamir Edilmiş Sürüm
 var BASE_URL = 'https://dizipal.im';
-var FETCH_TIMEOUT_MS = 8000;
+var FETCH_TIMEOUT = 10000;
 
 var HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Language': 'tr-TR,tr;q=0.9',
     'Referer': BASE_URL + '/'
 };
 
-var STREAM_HEADERS = {
-    'User-Agent': HEADERS['User-Agent'],
-    'Accept': 'video/webm,video/ogg,video/*;q=0.9,*/*;q=0.5',
-    'Accept-Language': 'tr-TR,tr;q=0.9',
-    'Accept-Encoding': 'identity',
-    'Origin': BASE_URL,
-    'Referer': BASE_URL + '/',
-    'DNT': '1'
-};
-
-function fetchWithTimeout(url, options) {
-    return new Promise(function(resolve, reject) {
-        var t = setTimeout(function() {
-            reject(new Error('Timeout: ' + url));
-        }, FETCH_TIMEOUT_MS);
-        fetch(url, options)
-            .then(function(r) { clearTimeout(t); resolve(r); })
-            .catch(function(e) { clearTimeout(t); reject(e); });
+function fetchWithTimeout(url, opts) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timeout: ' + url)), FETCH_TIMEOUT);
+        fetch(url, opts)
+            .then(r => { clearTimeout(timer); resolve(r); })
+            .catch(e => { clearTimeout(timer); reject(e); });
     });
 }
 
-function findAll(html, pattern) {
-    var results = [],
-        regex = new RegExp(pattern, 'gi'),
-        m;
-    while ((m = regex.exec(html)) !== null) results.push(m);
-    return results;
+// ---------- Yardımcılar ----------
+function extractM3u8Direct(html) {
+    // 1. doğrudan master.m3u8 içeren linkler
+    let m = html.match(/(https?:\/\/[^\s"']+master\.m3u8[^\s"']*)/i);
+    if (m) return m[1];
+    // 2. JSON / player ayarları içinde
+    m = html.match(/(?:source|file|src)\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']/i);
+    return m ? m[1] : null;
 }
 
-function findFirst(html, pattern) {
-    var m = new RegExp(pattern, 'i').exec(html);
-    return m ? m : null;
+function extractSubtitle(html, base) {
+    let m = html.match(/["']subtitle["']\s*:\s*["']([^"']+)["']/i);
+    if (!m) return null;
+    let subs = [];
+    m[1].split(',').forEach(part => {
+        part = part.trim();
+        if (!part) return;
+        let label = 'TR';
+        if (part.includes('[en]') || part.includes('_eng')) label = 'EN';
+        if (part.includes('[tr]') || part.includes('_tur')) label = 'TR';
+        subs.push({ label, url: part.startsWith('http') ? part : base + part });
+    });
+    return subs.length ? subs : null;
 }
 
-// ── Arama ────────────────────────────────────────────────────
-function searchDiziPal(title, mediaType) {
-    var searchUrl = BASE_URL + '/?s=' + encodeURIComponent(title);
-    return fetchWithTimeout(searchUrl, { headers: HEADERS })
-        .then(function(r) { return r.text(); })
-        .then(function(html) {
-            var results = [];
-            // Düzeltildi: Sabit domain (.bar) yerine değişken kullanıldı.
-            var domainPattern = BASE_URL.replace(/\./g, '\\.');
-            var re = new RegExp('<a[^>]+href="(' + domainPattern + '\/(?:dizi|film|anime)\/[^"]+)"[^>]*title="([^"]+)"', 'gi');
-            var m;
+function parseMaster(m3u8Url, streamHeaders) {
+    return fetchWithTimeout(m3u8Url, { headers: streamHeaders })
+        .then(r => r.text())
+        .then(data => {
+            const lines = data.split('\n');
+            let trAudio = null;
+            const streams = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line.includes('TYPE=AUDIO') && line.includes('LANGUAGE="tr"')) {
+                    const um = line.match(/URI="([^"]+)"/);
+                    if (um) trAudio = um[1];
+                }
+                if (line.startsWith('#EXT-X-STREAM-INF:')) {
+                    const url = lines[i + 1]?.trim();
+                    if (!url || url.startsWith('#')) continue;
+                    const resMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+                    const quality = resMatch
+                        ? (resMatch[1].startsWith('1920') ? '1080p' :
+                           resMatch[1].startsWith('1280') ? '720p' :
+                           resMatch[1].startsWith('854')  ? '480p' : '360p')
+                        : '720p';
+                    const fullUrl = url.startsWith('http') ? url : m3u8Url.replace(/[^/]+$/, '') + url;
+                    streams.push({ url: fullUrl, quality });
+                }
+            }
+            return { streams, trAudio };
+        })
+        .catch(() => ({ streams: [], trAudio: null }));
+}
+
+// ---------- Arama ----------
+function searchDizipal(title, type) {
+    const url = BASE_URL + '/?s=' + encodeURIComponent(title);
+    return fetchWithTimeout(url, { headers: HEADERS })
+        .then(r => r.text())
+        .then(html => {
+            const results = [];
+            const domain = BASE_URL.replace(/\./g, '\\.');
+            const re = new RegExp('<a[^>]+href="(' + domain + '/(?:dizi|film|anime)/[^"]+)"[^>]*title="([^"]+)"', 'gi');
+            let m;
             while ((m = re.exec(html)) !== null) {
-                var url = m[1];
-                var type = url.includes('/dizi/') || url.includes('/anime/') ? 'tv' : 'movie';
-                if (mediaType === 'movie' && type !== 'movie') continue;
-                if (mediaType === 'tv' && type === 'movie') continue;
-
-                if (!results.some(function(r) { return r.url === url; }))
-                    results.push({ title: m[2], url: url, type: type });
+                const isTv = m[1].includes('/dizi/') || m[1].includes('/anime/');
+                if (type === 'movie' && isTv) continue;
+                if (type === 'tv' && !isTv) continue;
+                if (!results.some(r => r.url === m[1]))
+                    results.push({ title: m[2], url: m[1], type: isTv ? 'tv' : 'movie' });
             }
             return results;
         });
 }
 
-function findBestMatch(results, query) {
-    if (!results || !results.length) return null;
-    var q = query.toLowerCase();
-    for (var i = 0; i < results.length; i++)
-        if (results[i].title.toLowerCase() === q) return results[i];
-    for (var j = 0; j < results.length; j++)
-        if (results[j].title.toLowerCase().includes(q)) return results[j];
-    return results[0];
+function bestMatch(results, query) {
+    if (!results.length) return null;
+    const q = query.toLowerCase();
+    const exact = results.find(r => r.title.toLowerCase() === q);
+    if (exact) return exact;
+    const partial = results.find(r => r.title.toLowerCase().includes(q));
+    return partial || results[0];
 }
 
-// ── İçerik sayfasındaki iframe'i bul ────────────────────────
-// Güncellendi: Daha güvenilir player tespiti için pattern'ler iyileştirildi.
-function loadContentPage(url) {
-    return fetchWithTimeout(url, { headers: HEADERS })
-        .then(function(r) { return r.text(); })
-        .then(function(html) {
-            // Öncelikli olarak "responsive-player" veya "series-player" sınıfına sahip bir iframe ara
-            var patterns = [
-                'class="[^"]*(?:responsive-player|series-player)[^"]*"[^>]*>[\\s\\S]*?<iframe[^>]+src="([^"]+)"',
-                '<iframe[^>]+src="([^"]+)"[^>]*class="[^"]*(?:responsive-player|series-player)[^"]*"',
-                '<div[^>]*id="vast_new"[^>]*>[\\s\\S]*?<iframe[^>]+src="([^"]+)"',
-                '<iframe[^>]+src="([^"]+)"' // Fallback: Herhangi bir iframe
+// ---------- İçerik sayfası & m3u8 bulma ----------
+function getEpisodeUrl(contentUrl, season, episode) {
+    const slug = contentUrl.replace(/\/$/, '').split('/').pop();
+    return `${BASE_URL}/bolum/${slug}-${season}-sezon-${episode}-bolum-izle/`;
+}
+
+function loadIframeAndM3u8(pageUrl) {
+    return fetchWithTimeout(pageUrl, { headers: HEADERS })
+        .then(r => r.text())
+        .then(html => {
+            // 1. Doğrudan m3u8 var mı?
+            let directM3u8 = extractM3u8Direct(html);
+            if (directM3u8) return { url: directM3u8, iframeOrigin: BASE_URL, subs: extractSubtitle(html, BASE_URL) };
+
+            // 2. iframe src bul
+            const iframePatterns = [
+                /<iframe[^>]+src="([^"]+)"/gi,
+                /\$\(['"]#player['"]\)\.html\(['"]<iframe[^>]+src="([^"]+)/gi,
+                /src=["'](https?:\/\/[^"']+embed[^"']+)["']/gi,
+                /data-src=["']([^"']+)["']/gi
             ];
-            for (var i = 0; i < patterns.length; i++) {
-                var m = findFirst(html, patterns[i]);
-                if (m) return m[1];
+            let iframeSrc = null;
+            for (const pat of iframePatterns) {
+                const m = pat.exec(html);
+                if (m) { iframeSrc = m[1]; break; }
             }
-            return null;
+            if (!iframeSrc) return null;
+
+            // iframe sayfasını çek
+            const origin = new URL(iframeSrc).origin;
+            return fetchWithTimeout(iframeSrc, { headers: { ...HEADERS, Referer: BASE_URL + '/' } })
+                .then(r => r.text())
+                .then(iframeHtml => {
+                    const m3u8 = extractM3u8Direct(iframeHtml);
+                    if (!m3u8) return null;
+                    return {
+                        url: m3u8,
+                        iframeOrigin: origin,
+                        subs: extractSubtitle(iframeHtml, origin)
+                    };
+                });
         });
 }
 
-// ── İframe içinden m3u8 ve altyazı çıkar ────────────────────
-// Güncellendi: Doğrudan <video> etiketinden m3u8 linkini yakalar.
-function extractM3u8FromIframe(iframeSrc) {
-    if (!iframeSrc) return Promise.resolve(null);
-    var url = iframeSrc.startsWith('http') ? iframeSrc : BASE_URL + iframeSrc;
-
-    return fetchWithTimeout(url, { headers: Object.assign({}, HEADERS, { 'Referer': BASE_URL + '/' }) })
-        .then(function(r) { return r.text(); })
-        .then(function(html) {
-            var origin = url.split('/').slice(0, 3).join('/');
-            // 1. Yöntem: <video> etiketi içinde "master.m3u8" ara
-            var m3uMatch = findFirst(html, 'src="(https?:\\/\\/[^"]+master\\.m3u8[^"]*)"');
-            if (!m3uMatch) {
-                // 2. Yöntem: JSON içinde "file" anahtarını ara (eski yöntem)
-                m3uMatch = findFirst(html, 'file:"([^"]+\\.m3u8[^"]*)"') || findFirst(html, '"file"\\s*:\\s*"([^"]+\\.m3u8[^"]*)"');
-            }
-            if (!m3uMatch) return null;
-
-            var result = {
-                url: m3uMatch[1],
-                subtitle: extractSubtitle(html),
-                iframeOrigin: origin
-            };
-            return result;
-        });
-}
-
-function extractSubtitle(html) {
-    var m = findFirst(html, '"subtitle"\\s*:\\s*"([^"]+)"');
-    return m ? m[1] : null;
-}
-
-// ── Master m3u8 parse (TR dublaj & kalite seçenekleri) ─────
-// İyileştirildi: Daha güvenilir çözünürlük tespiti ve hata yönetimi.
-var m3u8Cache = {};
-function parseMasterM3u8(masterUrl, streamHeaders) {
-    if (m3u8Cache[masterUrl]) return Promise.resolve(m3u8Cache[masterUrl]);
-
-    return fetchWithTimeout(masterUrl, { headers: streamHeaders })
-        .then(function(r) { return r.text(); })
-        .then(function(m3u8) {
-            var lines = m3u8.split('\n');
-            var turkishAudioUrl = null;
-            var streams = [];
-
-            for (var i = 0; i < lines.length; i++) {
-                var l = lines[i].trim();
-
-                if (l.includes('TYPE=AUDIO') && l.includes('LANGUAGE="tr"')) {
-                    var um = l.match(/URI="([^"]+)"/);
-                    if (um) turkishAudioUrl = um[1];
-                }
-
-                if (l.startsWith('#EXT-X-STREAM-INF:')) {
-                    var next = (lines[i + 1] || '').trim();
-                    if (!next || next.startsWith('#')) continue;
-
-                    var rm = l.match(/RESOLUTION=(\d+x\d+)/);
-                    var res = rm ? rm[1] : '';
-                    var quality = res.includes('1920') ? '1080p' :
-                                  res.includes('1280') ? '720p' :
-                                  res.includes('854')  ? '480p' :
-                                  res.includes('640')  ? '360p' : '720p';
-
-                    var su = next.startsWith('http') ? next : masterUrl.split('/').slice(0, -1).join('/') + '/' + next;
-                    streams.push({ url: su, quality: quality });
-                }
-            }
-
-            var result = { streams: streams, turkishAudioUrl: turkishAudioUrl };
-            m3u8Cache[masterUrl] = result;
-            return result;
-        })
-        .catch(function() {
-            return { streams: [], turkishAudioUrl: null };
-        });
-}
-
-// ── Bölüm URL'si oluştur ────────────────────────────────────
-function getEpisodeUrl(contentUrl, s, e) {
-    var slug = contentUrl.replace(/\/$/, '').split('/dizi/')[1] || '';
-    return BASE_URL + '/bolum/' + slug.replace(/\/$/, '') + '-' + s + '-sezon-' + e + '-bolum-izle/';
-}
-
-// ── Ana fonksiyon ──────────────────────────────────────────
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-    var tmdbType = mediaType === 'movie' ? 'movie' : 'tv';
-    var tmdbUrl = 'https://api.themoviedb.org/3/' + tmdbType + '/' + tmdbId + '?language=tr-TR&api_key=4ef0d7355d9ffb5151e987764708ce96';
+// ---------- Ana akış sağlayıcı ----------
+function getStreams(tmdbId, mediaType, season, episode) {
+    const typePath = mediaType === 'movie' ? 'movie' : 'tv';
+    const tmdbUrl = `https://api.themoviedb.org/3/${typePath}/${tmdbId}?api_key=4ef0d7355d9ffb5151e987764708ce96&language=tr-TR`;
 
     return fetchWithTimeout(tmdbUrl, {})
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            var title = data.title || data.name || '';
-            var year = (data.release_date || data.first_air_date || '').substring(0, 4);
-            var origTitle = data.original_title || data.original_name || '';
-
+        .then(r => r.json())
+        .then(data => {
+            const title = data.title || data.name || '';
+            const origTitle = data.original_title || data.original_name || '';
+            const year = (data.release_date || data.first_air_date || '').substring(0, 4);
             if (!title) return [];
 
-            var searches = [searchDiziPal(title, mediaType)];
-            if (origTitle && origTitle !== title) searches.push(searchDiziPal(origTitle, mediaType));
+            const searches = [searchDizipal(title, mediaType)];
+            if (origTitle && origTitle !== title) searches.push(searchDizipal(origTitle, mediaType));
 
-            return Promise.all(searches).then(function(allResults) {
-                var results = allResults[0];
-                if ((!results || !results.length) && allResults[1]) results = allResults[1];
-
-                var best = findBestMatch(results, title) || (origTitle ? findBestMatch(results, origTitle) : null);
+            return Promise.all(searches).then(all => {
+                let results = all[0];
+                if (!results.length && all[1]) results = all[1];
+                const best = bestMatch(results, title) || bestMatch(results, origTitle);
                 if (!best) return [];
 
-                var targetUrl = best.url;
-                if (mediaType === 'tv' && seasonNum && episodeNum)
-                    targetUrl = getEpisodeUrl(best.url, seasonNum, episodeNum);
+                const finalUrl = mediaType === 'tv' && season && episode
+                    ? getEpisodeUrl(best.url, season, episode)
+                    : best.url;
 
-                return loadContentPage(targetUrl)
-                    .then(function(iframeSrc) {
-                        return extractM3u8FromIframe(iframeSrc);
-                    })
-                    .then(function(result) {
-                        if (!result || !result.url) return [];
+                return loadIframeAndM3u8(finalUrl).then(streamData => {
+                    if (!streamData || !streamData.url) return [];
 
-                        var subtitles = [];
-                        if (result.subtitle) {
-                            result.subtitle.split(',').forEach(function(sub) {
-                                sub = sub.trim();
-                                if (!sub) return;
-                                var sl = findFirst(sub, '\\[([^\\]]+)\\]');
-                                var su = sub.replace(/\[[^\]]+\]/, '').trim() || sub;
-                                var label = sl ? sl[1] : (sub.includes('_tur') ? 'Türkçe' : 'İngilizce');
-                                if (su) subtitles.push({ label: label, url: su });
+                    const streamHeaders = {
+                        ...HEADERS,
+                        Referer: (streamData.iframeOrigin || BASE_URL) + '/',
+                        Origin: streamData.iframeOrigin || BASE_URL
+                    };
+
+                    return parseMaster(streamData.url, streamHeaders).then(parsed => {
+                        const list = [];
+                        const subs = streamData.subs || [];
+
+                        if (parsed.trAudio && parsed.streams.length) {
+                            parsed.streams.forEach(s => {
+                                list.push({
+                                    name: `⌜ DiziPal ⌟ | TR Dublaj | ${s.quality}`,
+                                    title: `${title}${year ? ' ('+year+')' : ''}`,
+                                    url: s.url,
+                                    quality: s.quality,
+                                    headers: streamHeaders,
+                                    subtitles: subs
+                                });
                             });
                         }
 
-                        var sh = Object.assign({}, STREAM_HEADERS, {
-                            'Referer': (result.iframeOrigin || BASE_URL) + '/',
-                            'Origin': result.iframeOrigin || BASE_URL
+                        // Orijinal altyazılı akış
+                        list.push({
+                            name: '⌜ DiziPal ⌟ | Altyazılı',
+                            title: `${title}${year ? ' ('+year+')' : ''}`,
+                            url: streamData.url,
+                            quality: '720p',
+                            headers: streamHeaders,
+                            subtitles: subs
                         });
 
-                        return parseMasterM3u8(result.url, sh)
-                            .then(function(parsed) {
-                                var streams = [];
-
-                                // TR Dublaj seçenekleri
-                                if (parsed.turkishAudioUrl && parsed.streams.length > 0) {
-                                    parsed.streams.forEach(function(s) {
-                                        streams.push({
-                                            name: '⌜ DiziPal ⌟ | TR Dublaj | ' + s.quality,
-                                            title: title + (year ? ' (' + year + ')' : '') + ' · ' + s.quality,
-                                            url: s.url,
-                                            quality: s.quality,
-                                            headers: sh,
-                                            subtitles: subtitles
-                                        });
-                                    });
-                                }
-
-                                // Altyazılı orijinal seçenek
-                                streams.push({
-                                    name: '⌜ DiziPal ⌟ | Altyazılı',
-                                    title: title + (year ? ' (' + year + ')' : ''),
-                                    url: result.url,
-                                    quality: '720p',
-                                    headers: sh,
-                                    subtitles: subtitles
-                                });
-
-                                return streams;
-                            });
+                        return list;
                     });
+                });
             });
         })
-        .catch(function(err) {
-            console.error('[DiziPal] Hata: ' + err.message);
+        .catch(err => {
+            console.error('[DiziPal]', err);
             return [];
         });
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { getStreams: getStreams };
-} else {
-    global.getStreams = getStreams;
-}
+if (typeof module !== 'undefined') module.exports = { getStreams };
+else global.getStreams = getStreams;
