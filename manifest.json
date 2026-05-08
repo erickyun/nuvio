@@ -1,6 +1,6 @@
 {
   "name": "Erickyun",
-  "version": "1.0.4",
+  "version": "0.0.2",
   "scrapers": [
     {
       "id": "filmmodu",
@@ -108,7 +108,7 @@
       "limited": false,
       "disabledPlatforms": []
     },
-        {
+    {
       "id": "dizipal",
       "name": "dizipal",
       "description": "Türkçe altyazılı ve dublaj yabancı diziler.",
@@ -118,7 +118,7 @@
         "movie",
         "tv"
       ],
-      "filename": "providers/dizilla.js",
+      "filename": "providers/dizipal.js",
       "enabled": true,
       "contentLanguage": [
         "tr"
