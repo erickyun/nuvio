@@ -6,7 +6,7 @@
 //  4. TR/EN başlık aramaları PARALEL (orijinalde sıralıydı: önce TR, bulamazsa EN)
 //  5. Master m3u8 parse sonucu cache'lenir (aynı URL için ikinci kez fetch yapılmaz)
 
-var BASE_URL = 'https://dizipal.bar';
+var BASE_URL = 'https://dizipal.im';
 var FETCH_TIMEOUT_MS = 8000;
 
 var HEADERS = {
