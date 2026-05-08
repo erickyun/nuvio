@@ -1,381 +1,560 @@
-// DiziPal — Nuvio Provider DEBUG / URL-FIXED SAFE VERSION
-//
-// Bu sürüm yalnızca DiziPal'in mevcut URL yapısına göre dizi/bölüm sayfasını bulur
-// ve neden stream çıkmadığını loglar. Telifli/izinsiz kaynaklardan oynatılabilir
-// m3u8/mp4 stream URL'si çıkarmaya veya player/API etrafından dolaşmaya yönelik
-// kod içermez.
-//
-// Test edilen gerçek URL kalıpları:
-//   https://dizipal.im/dizi/gassal/
-//   https://dizipal.im/bolum/gassal-1-sezon-1-bolum-izle/
-//   https://dizipal.im/dizi/gibi/
-//   https://dizipal.im/bolum/gibi-1-sezon-1-bolum-izle/
+/*
+ * Dizipal Provider for Nuvio
+ * Fixed & Enhanced Version
+ * Author: Assistant
+ * Date: 2024
+ */
 
-var TMDB_API_KEY = '500330721680edb6d5f7f12ba7cd9023';
-var BASE_URL = 'https://dizipal.im';
-var FETCH_TIMEOUT_MS = 10000;
-var PROVIDER_NAME = 'DiziPal-Debug';
+const axios = require('axios');
+const cheerio = require('cheerio');
+const { load } = cheerio;
 
-var HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-  'Referer': BASE_URL + '/'
-};
-
-function log(msg) {
-  try { console.log('[' + PROVIDER_NAME + '] ' + msg); } catch (_) {}
-}
-
-function warn(msg) {
-  try { console.warn('[' + PROVIDER_NAME + '] ' + msg); } catch (_) { log('WARN: ' + msg); }
-}
-
-function fetchWithTimeout(url, options) {
-  options = options || {};
-  return new Promise(function(resolve, reject) {
-    var done = false;
-    var t = setTimeout(function() {
-      if (done) return;
-      done = true;
-      reject(new Error('Timeout: ' + url));
-    }, FETCH_TIMEOUT_MS);
-
-    fetch(url, options)
-      .then(function(r) {
-        if (done) return;
-        done = true;
-        clearTimeout(t);
-        resolve(r);
-      })
-      .catch(function(e) {
-        if (done) return;
-        done = true;
-        clearTimeout(t);
-        reject(e);
-      });
-  });
-}
-
-function fetchText(url, referer) {
-  return fetchWithTimeout(url, {
-    headers: Object.assign({}, HEADERS, { 'Referer': referer || BASE_URL + '/' })
-  }).then(function(r) {
-    log('GET ' + url + ' => HTTP ' + r.status);
-    if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
-    return r.text();
-  });
-}
-
-function fetchJson(url) {
-  return fetchWithTimeout(url, {
-    headers: { 'Accept': 'application/json' }
-  }).then(function(r) {
-    if (!r.ok) throw new Error('TMDB HTTP ' + r.status);
-    return r.json();
-  });
-}
-
-function htmlDecode(s) {
-  return String(s || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&#038;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function titleToSlug(title) {
-  return String(title || '')
-    .toLowerCase()
-    .replace(/ğ/g, 'g')
-    .replace(/ü/g, 'u')
-    .replace(/ş/g, 's')
-    .replace(/ı/g, 'i')
-    .replace(/İ/g, 'i')
-    .replace(/ö/g, 'o')
-    .replace(/ç/g, 'c')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-function normalizeTitle(title) {
-  return titleToSlug(htmlDecode(title)).replace(/-/g, ' ').trim();
-}
-
-function absUrl(url) {
-  if (!url) return '';
-  if (/^https?:\/\//i.test(url)) return url;
-  if (url.charAt(0) === '/') return BASE_URL + url;
-  return BASE_URL + '/' + url;
-}
-
-function uniqueByUrl(list) {
-  var seen = {};
-  var out = [];
-  for (var i = 0; i < list.length; i++) {
-    var u = list[i] && list[i].url;
-    if (!u || seen[u]) continue;
-    seen[u] = true;
-    out.push(list[i]);
-  }
-  return out;
-}
-
-function fetchTmdbInfo(tmdbId, mediaType) {
-  var endpoint = mediaType === 'movie' ? 'movie' : 'tv';
-  var url = 'https://api.themoviedb.org/3/' + endpoint + '/' + tmdbId +
-    '?api_key=' + encodeURIComponent(TMDB_API_KEY) + '&language=tr-TR';
-
-  return fetchJson(url).then(function(d) {
-    return {
-      titleTr: d.title || d.name || '',
-      titleEn: d.original_title || d.original_name || '',
-      year: String(d.release_date || d.first_air_date || '').slice(0, 4)
-    };
-  });
-}
-
-function searchDiziPal(query, mediaType) {
-  var url = BASE_URL + '/?s=' + encodeURIComponent(query);
-  log('Arama: ' + url);
-
-  return fetchText(url, BASE_URL + '/')
-    .then(function(html) {
-      var results = [];
-      var re = /<a[^>]+href=["']([^"']+)["'][^>]*title=["']([^"']+)["']/gi;
-      var m;
-
-      while ((m = re.exec(html)) !== null) {
-        var href = absUrl(htmlDecode(m[1]));
-        var title = htmlDecode(m[2]);
-
-        var isTv = href.indexOf('/dizi/') !== -1 || href.indexOf('/anime/') !== -1;
-        var isMovie = href.indexOf('/film/') !== -1 || /^https?:\/\/[^/]+\/[a-z0-9-]+\/?$/i.test(href);
-
-        if (mediaType === 'tv' && !isTv) continue;
-        if (mediaType === 'movie' && isTv) continue;
-
-        if (href.indexOf(BASE_URL) === 0) {
-          results.push({ title: title, url: href, type: isTv ? 'tv' : 'movie' });
-        }
-      }
-
-      results = uniqueByUrl(results);
-      log('Arama sonucu sayısı: ' + results.length);
-      for (var i = 0; i < Math.min(results.length, 5); i++) {
-        log('Sonuç ' + (i + 1) + ': ' + results[i].title + ' => ' + results[i].url);
-      }
-      return results;
-    })
-    .catch(function(e) {
-      warn('Arama hata: ' + e.message);
-      return [];
-    });
-}
-
-function scoreResult(result, titleTr, titleEn) {
-  var rt = normalizeTitle(result.title);
-  var tr = normalizeTitle(titleTr);
-  var en = normalizeTitle(titleEn);
-
-  if (tr && rt === tr) return 100;
-  if (en && rt === en) return 95;
-  if (tr && rt.indexOf(tr) !== -1) return 80;
-  if (en && rt.indexOf(en) !== -1) return 75;
-  if (tr && tr.indexOf(rt) !== -1) return 60;
-  if (en && en.indexOf(rt) !== -1) return 55;
-  return 1;
-}
-
-function pickBestResult(results, titleTr, titleEn) {
-  if (!results || !results.length) return null;
-  var best = results[0];
-  var bestScore = scoreResult(best, titleTr, titleEn);
-
-  for (var i = 1; i < results.length; i++) {
-    var s = scoreResult(results[i], titleTr, titleEn);
-    if (s > bestScore) {
-      best = results[i];
-      bestScore = s;
+class DizipalProvider {
+    constructor() {
+        this.id = 'dizipal';
+        this.name = 'Dizipal';
+        this.baseURL = 'https://dizipal.im';
+        this.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': this.baseURL,
+        };
     }
-  }
 
-  log('En iyi eşleşme: ' + best.title + ' | skor=' + bestScore + ' | ' + best.url);
-  return best;
-}
-
-function buildSeriesUrlFromSlug(slug) {
-  return BASE_URL + '/dizi/' + slug + '/';
-}
-
-function buildEpisodeUrlFromSlug(slug, season, episode) {
-  return BASE_URL + '/bolum/' + slug + '-' + season + '-sezon-' + episode + '-bolum-izle/';
-}
-
-function slugFromSeriesUrl(url) {
-  var m = String(url || '').match(/\/dizi\/([^/?#]+)\/?/i);
-  return m ? m[1] : '';
-}
-
-function verifyPage(url) {
-  return fetchText(url, BASE_URL + '/')
-    .then(function(html) {
-      return { url: url, html: html, ok: true };
-    })
-    .catch(function(e) {
-      warn('Sayfa doğrulanamadı: ' + url + ' | ' + e.message);
-      return null;
-    });
-}
-
-function resolveSeriesPage(info, mediaType) {
-  if (mediaType !== 'tv') {
-    return searchDiziPal(info.titleTr || info.titleEn, mediaType).then(function(results) {
-      return pickBestResult(results, info.titleTr, info.titleEn);
-    });
-  }
-
-  var slugs = [];
-  var slugTr = titleToSlug(info.titleTr);
-  var slugEn = titleToSlug(info.titleEn);
-  if (slugTr) slugs.push(slugTr);
-  if (slugEn && slugEn !== slugTr) slugs.push(slugEn);
-
-  function tryDirect(i) {
-    if (i >= slugs.length) return Promise.resolve(null);
-    var url = buildSeriesUrlFromSlug(slugs[i]);
-    log('Direkt dizi sayfası deneniyor: ' + url);
-    return verifyPage(url).then(function(res) {
-      if (res && /\/bolum\//i.test(res.html)) {
-        return { title: info.titleTr || info.titleEn, url: url, type: 'tv', html: res.html };
-      }
-      return tryDirect(i + 1);
-    });
-  }
-
-  return tryDirect(0).then(function(found) {
-    if (found) return found;
-
-    var queries = [];
-    if (info.titleTr) queries.push(info.titleTr);
-    if (info.titleEn && info.titleEn !== info.titleTr) queries.push(info.titleEn);
-
-    var promises = queries.map(function(q) { return searchDiziPal(q, mediaType); });
-    return Promise.all(promises).then(function(all) {
-      var merged = [];
-      all.forEach(function(list) { merged = merged.concat(list || []); });
-      merged = uniqueByUrl(merged);
-      return pickBestResult(merged, info.titleTr, info.titleEn);
-    });
-  });
-}
-
-function extractEpisodeLinksFromSeriesHtml(html) {
-  var links = [];
-  var re = /<a[^>]+href=["']([^"']*\/bolum\/[^"']+)["'][^>]*>/gi;
-  var m;
-  while ((m = re.exec(html)) !== null) {
-    links.push(absUrl(htmlDecode(m[1])));
-  }
-  var seen = {};
-  return links.filter(function(u) {
-    if (seen[u]) return false;
-    seen[u] = true;
-    return true;
-  });
-}
-
-function resolveEpisodePage(series, season, episode) {
-  var slug = slugFromSeriesUrl(series.url);
-  var directUrl = slug ? buildEpisodeUrlFromSlug(slug, season, episode) : '';
-
-  if (directUrl) {
-    log('Direkt bölüm URL deneniyor: ' + directUrl);
-    return verifyPage(directUrl).then(function(res) {
-      if (res) return res;
-      return null;
-    });
-  }
-
-  return verifyPage(series.url).then(function(res) {
-    if (!res) return null;
-    var links = extractEpisodeLinksFromSeriesHtml(res.html);
-    var needle = '-' + season + '-sezon-' + episode + '-bolum-izle/';
-    for (var i = 0; i < links.length; i++) {
-      if (links[i].indexOf(needle) !== -1) return verifyPage(links[i]);
-    }
-    return null;
-  });
-}
-
-function inspectForPublicPlayer(html) {
-  var report = {
-    hasIframe: /<iframe\b/i.test(html),
-    hasPlayer: /player|video-player-area|responsive-player/i.test(html),
-    hasM3u8: /\.m3u8/i.test(html),
-    hasMp4: /\.mp4/i.test(html),
-    iframeUrls: []
-  };
-
-  var iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
-  var m;
-  while ((m = iframeRe.exec(html)) !== null) {
-    report.iframeUrls.push(absUrl(htmlDecode(m[1])));
-  }
-
-  return report;
-}
-
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-  log('Başladı | tmdbId=' + tmdbId + ' | mediaType=' + mediaType + (mediaType === 'tv' ? ' | S' + seasonNum + 'E' + episodeNum : ''));
-
-  return fetchTmdbInfo(tmdbId, mediaType)
-    .then(function(info) {
-      log('TMDB: TR="' + info.titleTr + '" EN="' + info.titleEn + '" YEAR=' + info.year);
-
-      return resolveSeriesPage(info, mediaType).then(function(series) {
-        if (!series || !series.url) {
-          warn('Dizi/film sayfası bulunamadı.');
-          return [];
-        }
-
-        if (mediaType !== 'tv') {
-          warn('Bu debug sürümü film stream çıkarmıyor. Bulunan sayfa: ' + series.url);
-          return [];
-        }
-
-        return resolveEpisodePage(series, seasonNum, episodeNum).then(function(ep) {
-          if (!ep || !ep.html) {
-            warn('Bölüm sayfası bulunamadı.');
-            return [];
-          }
-
-          log('Bölüm sayfası bulundu: ' + ep.url);
-
-          var report = inspectForPublicPlayer(ep.html);
-          log('Sayfa analizi: iframe=' + report.hasIframe + ', player=' + report.hasPlayer + ', m3u8=' + report.hasM3u8 + ', mp4=' + report.hasMp4 + ', iframeSayısı=' + report.iframeUrls.length);
-
-          if (report.iframeUrls.length) {
-            report.iframeUrls.forEach(function(u, idx) {
-              log('iframe[' + idx + ']: ' + u);
+    /**
+     * Ana sayfa veya dizi sayfasından bölüm listesi çek
+     */
+    async getEpisodeList(url) {
+        try {
+            const response = await axios.get(url, {
+                headers: this.headers,
+                timeout: 15000
             });
-          }
+            
+            const $ = load(response.data);
+            const episodes = [];
 
-          warn('Bu sayfanın düz HTML cevabında herkese açık oynatılabilir stream bulunamadı veya bu sürümde çıkarılmıyor. getStreams güvenli olarak [] döndürüyor.');
-          return [];
+            // Bölüm listesini farklı selector'larla dene
+            const selectors = [
+                '.episode-list .episode-item',
+                '.episodes .episode',
+                '.bolum-listesi .bolum',
+                '[data-episode]',
+                '.season-episodes a'
+            ];
+
+            for (const selector of selectors) {
+                $(selector).each((index, element) => {
+                    const $el = $(element);
+                    const episodeUrl = $el.attr('href') || $el.data('href') || $el.find('a').attr('href');
+                    const episodeNum = $el.find('.episode-num, .bolum-no, .number').text().trim() || (index + 1).toString();
+                    const title = $el.find('.title, .bolum-baslik, h3, h4').text().trim() || `Bölüm ${episodeNum}`;
+
+                    if (episodeUrl && !episodes.find(e => e.url === episodeUrl)) {
+                        episodes.push({
+                            url: this.resolveURL(episodeUrl),
+                            episode: parseInt(episodeNum) || index + 1,
+                            title: title
+                        });
+                    }
+                });
+
+                if (episodes.length > 0) break;
+            }
+
+            return {
+                success: true,
+                data: episodes
+            };
+
+        } catch (error) {
+            console.error('[Dizipal] Episode list error:', error.message);
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * Bölüm sayfasından video kaynaklarını çek - ANA FONKSİYON
+     */
+    async getVideoSources(episodeUrl) {
+        try {
+            console.log(`[Dizipal] Fetching episode: ${episodeUrl}`);
+            
+            // 1. Bölüm sayfasını getir
+            const pageResponse = await axios.get(episodeUrl, {
+                headers: this.headers,
+                timeout: 20000,
+                maxRedirects: 5
+            });
+
+            const $ = load(pageResponse.data);
+            const sources = [];
+
+            // 2. Video player container'ını bul (çoklu yöntem)
+            const playerData = await this.extractPlayerData($, episodeUrl);
+            
+            if (playerData && playerData.sources) {
+                sources.push(...playerData.sources);
+            }
+
+            // 3. Alternatif: Embed/iframe URL'lerinden video çıkar
+            const embedSources = await this.extractFromEmbeds($, episodeUrl);
+            if (embedSources.length > 0) {
+                sources.push(...embedSources);
+            }
+
+            // 4. Sayfa kaynağından doğrudan m3u8/mp4 URL'leri ara
+            const directSources = this.extractDirectURLs(pageResponse.data, episodeUrl);
+            if (directSources.length > 0) {
+                sources.push(...directSources);
+            }
+
+            // Tekrarları temizle
+            const uniqueSources = this.deduplicateSources(sources);
+
+            console.log(`[Dizipal] Found ${uniqueSources.length} sources`);
+
+            return {
+                success: true,
+                data: uniqueSources,
+                url: episodeUrl
+            };
+
+        } catch (error) {
+            console.error('[Dizipal] Video source error:', error.message);
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * Player container'dan video verisi çıkar
+     */
+    async extractPlayerData($, referer) {
+        const result = { sources: [] };
+
+        // Yöntem 1: JSON-LD veya script tag'leri içindeki veri
+        $('script').each((idx, el) => {
+            const content = $(el).html() || '';
+            
+            // JSON formatında video verisi ara
+            const jsonPatterns = [
+                /["']?sources["']?\s*:\s*(\[[^\]]+\])/g,
+                /["']?file["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']/g,
+                /["']?src["']?\s*:\s*["']([^"']+(?:m3u8|mp4)[^"']*)["']/g,
+                /["']?video_url["']?\s*:\s*["']([^"']+)["']/g,
+                /["']?stream_url["']?\s*:\s*["']([^"']+)["']/g
+            ];
+
+            for (const pattern of jsonPatterns) {
+                let match;
+                while ((match = pattern.exec(content)) !== null) {
+                    try {
+                        const data = match[1];
+                        if (data.startsWith('[')) {
+                            const parsed = JSON.parse(data.replace(/'/g, '"'));
+                            parsed.forEach(src => {
+                                if (src.file || src.src || src.url) {
+                                    result.sources.push({
+                                        url: src.file || src.src || src.url,
+                                        type: src.type || this.detectFileType(src.file || src.src || src.url),
+                                        quality: src.quality || src.label || 'auto',
+                                        server: src.server || 'main'
+                                    });
+                                }
+                            });
+                        } else if (data.includes('m3u8') || data.includes('mp4')) {
+                            result.sources.push({
+                                url: data,
+                                type: this.detectFileType(data),
+                                quality: 'auto',
+                                server: 'extracted'
+                            });
+                        }
+                    } catch (e) {}
+                }
+            }
         });
-      });
-    })
-    .catch(function(err) {
-      warn('Genel hata: ' + (err && err.message ? err.message : String(err)));
-      return [];
-    });
+
+        // Yöntem 2: Data attribute'larından
+        const playerSelectors = [
+            '#player', '.player', '.video-player', '#videoPlayer',
+            '[data-video]', '[data-source]', '[data-url]',
+            '.jwplayer', '.videojs', '#hls-player'
+        ];
+
+        for (const selector of playerSelectors) {
+            const $player = $(selector).first();
+            if ($player.length) {
+                const dataVideo = $player.data('video') || $player.data('source') || $player.data('url') || $player.data('src');
+                if (dataVideo) {
+                    if (typeof dataVideo === 'string') {
+                        result.sources.push({
+                            url: dataVideo,
+                            type: this.detectFileType(dataVideo),
+                            quality: 'data-attr',
+                            server: 'player-data'
+                        });
+                    } else if (Array.isArray(dataVideo)) {
+                        dataVideo.forEach(src => {
+                            result.sources.push({
+                                url: src.file || src.src || src,
+                                type: this.detectFileType(src.file || src.src || src),
+                                quality: src.quality || 'auto',
+                                server: 'player-array'
+                            });
+                        });
+                    }
+                }
+            }
+        }
+
+        // Yöntem 3: Meta tags
+        $('meta[property="og:video"], meta[name="video:url"], meta[name="twitter:player:stream"]').each((idx, el) => {
+            const content = $(el).attr('content');
+            if (content && (content.includes('.m3u8') || content.includes('.mp4'))) {
+                result.sources.push({
+                    url: content,
+                    type: this.detectFileType(content),
+                    quality: 'meta',
+                    server: 'og-meta'
+                });
+            }
+        });
+
+        return result;
+    }
+
+    /**
+     * Iframe/embed URL'lerinden video kaynakları çıkar
+     */
+    async extractFromEmbeds($, referer) {
+        const sources = [];
+        const embedUrls = new Set();
+
+        // Tüm iframe'leri topla
+        $('iframe').each((idx, el) => {
+            const src = $(el).attr('src') || $(el).attr('data-src');
+            if (src && !src.includes('advertisement') && !src.includes('ads')) {
+                embedUrls.add(this.resolveURL(src));
+            }
+        });
+
+        // Embed container'larından URL çıkar
+        $('.embed-container, .video-embed, [data-embed], .source-item').each((idx, el) => {
+            const $el = $(el);
+            const src = $el.attr('data-src') || $el.attr('data-url') || $el.attr('href') || $el.find('iframe').attr('src');
+            if (src) embedUrls.add(this.resolveURL(src));
+        });
+
+        // Her embed URL'sinden video çıkar
+        for (const embedUrl of embedUrls) {
+            try {
+                const embedSources = await this.extractFromSingleEmbed(embedUrl, referer);
+                sources.push(...embedSources);
+            } catch (e) {
+                console.log(`[Dizipal] Embed extract failed: ${embedUrl}`, e.message);
+            }
+        }
+
+        return sources;
+    }
+
+    /**
+     * Tekil embed URL'den video çıkar
+     */
+    async extractFromSingleEmbed(embedUrl, parentReferer) {
+        const sources = [];
+        
+        try {
+            const headers = {
+                ...this.headers,
+                'Referer': parentReferer || this.baseURL
+            };
+
+            const response = await axios.get(embedUrl, {
+                headers,
+                timeout: 10000,
+                maxRedirects: 5
+            });
+
+            const html = response.data;
+            const finalUrl = response.request.res.responseUrl || embedUrl;
+
+            // HTML içeriğinde m3u8/mp4 ara
+            const patterns = [
+                /(?:https?:)?\/\/[^"'\s<>]+\.m3u8[^"'\s]*/gi,
+                /(?:https?:)?\/\/[^"'\s<>]+\.mp4[^"'\s]*/gi,
+                /["']?(?:file|src|url|source)["']?\s*[:=]\s*["']([^"']+(?:m3u8|mp4)[^"']*)["']/gi,
+                /source\s+src=["']([^"']+)["']/gi
+            ];
+
+            for (const pattern of patterns) {
+                let match;
+                while ((match = pattern.exec(html)) !== null) {
+                    let url = match[1] || match[0];
+                    
+                    // Protokol ekle
+                    if (url.startsWith('//')) url = 'https:' + url;
+                    
+                    // Geçerli video URL kontrolü
+                    if (this.isValidVideoURL(url)) {
+                        sources.push({
+                            url: url,
+                            type: this.detectFileType(url),
+                            quality: this.extractQuality(html) || 'auto',
+                            server: this.extractServerName(finalUrl),
+                            referer: finalUrl
+                        });
+                    }
+                }
+            }
+
+            // Script tag'lerindeki config objelerini ara
+            const $ = load(html);
+            $('script').each((idx, el) => {
+                const content = $(el).html() || '';
+                
+                // Player config'leri
+                const configMatches = content.match(/(?:var\s+\w*\s*=\s*)?(\{[^{}]*(?:file|src|source|hls)[^{}]*\})/g);
+                if (configMatches) {
+                    configMatches.forEach(configStr => {
+                        try {
+                            // Basit JSON parse denemesi
+                            const cleanConfig = configStr
+                                .replace(/(\w+)\s*:/g, '"$1":')
+                                .replace(/'/g, '"');
+                            
+                            const config = JSON.parse(cleanConfig);
+                            
+                            ['file', 'src', 'source', 'hls', 'url'].forEach(key => {
+                                if (config[key] && this.isValidVideoURL(config[key])) {
+                                    sources.push({
+                                        url: config[key],
+                                        type: this.detectFileType(config[key]),
+                                        quality: config.quality || config.label || 'auto',
+                                        server: 'embed-config'
+                                    });
+                                }
+                            });
+                        } catch (e) {}
+                    });
+                }
+            });
+
+        } catch (error) {
+            console.error(`[Dizipal] Single embed error (${embedUrl}):`, error.message);
+        }
+
+        return sources;
+    }
+
+    /**
+     * HTML kaynağından doğrudan video URL'leri çıkar
+     */
+    extractDirectURLs(html, referer) {
+        const sources = [];
+        
+        // Tüm olası video URL pattern'leri
+        const patterns = [
+            // Standart m3u8 URL'ler (dizipal formatı dahil)
+            /https?:\/\/[a-zA-Z0-9.-]+\.(?:uk-traffic|cloudflare|cdn)\.[a-z]+\/hls?[\/\w-]+\.m3u8[?\w=&.-]*/gi,
+            // Genel m3u8
+            /\.m3u8[?\w=&.-]*/gi,
+            // MP4
+            /\.mp4[?\w=&.-]*/gi,
+            // Master playlist
+            /master\.m3u8[?\w=&.-]*/gi
+        ];
+
+        for (const pattern of patterns) {
+            let match;
+            while ((match = pattern.exec(html)) !== null) {
+                let url = match[0];
+                
+                if (this.isValidVideoURL(url) && !sources.find(s => s.url === url)) {
+                    sources.push({
+                        url: url,
+                        type: this.detectFileType(url),
+                        quality: 'direct',
+                        server: 'page-source',
+                        referer: referer
+                    });
+                }
+            }
+        }
+
+        return sources;
+    }
+
+    /**
+     * Arama fonksiyonu
+     */
+    async search(query) {
+        try {
+            const searchUrl = `${this.baseURL}/ara?q=${encodeURIComponent(query)}`;
+            const response = await axios.get(searchUrl, {
+                headers: this.headers,
+                timeout: 15000
+            });
+
+            const $ = load(response.data);
+            const results = [];
+
+            // Sonuç kartlarını bul
+            $('.search-result, .result-item, .dizi-card, .movie-card').each((idx, el) => {
+                const $el = $(el);
+                const title = $el.find('.title, .name, h2, h3, a').first().text().trim();
+                const url = $el.find('a').first().attr('href');
+                const image = $el.find('img').attr('src') || $el.find('img').attr('data-src');
+                const year = $el.find('.year, .date').text().trim();
+
+                if (title && url) {
+                    results.push({
+                        title,
+                        url: this.resolveURL(url),
+                        image: image ? this.resolveURL(image) : null,
+                        year: year || null
+                    });
+                }
+            });
+
+            return { success: true, data: results };
+
+        } catch (error) {
+            console.error('[Dizipal] Search error:', error.message);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // === YARDIMCI FONKSİYONLAR ===
+
+    resolveURL(url) {
+        if (!url) return '';
+        if (url.startsWith('http://') || url.startsWith('https://')) return url;
+        if (url.startsWith('//')) return 'https:' + url;
+        return this.baseURL + (url.startsWith('/') ? '' : '/') + url;
+    }
+
+    isValidVideoURL(url) {
+        if (!url) return false;
+        const validExtensions = ['.m3u8', '.mp4', '.webm', '.mkv'];
+        const hasValidExt = validExtensions.some(ext => url.toLowerCase().includes(ext));
+        const isValidDomain = url.match(/^https?:\/\/[a-zA-Z0-9.-]+\.[a-z]{2,}/);
+        return hasValidExt && isValidDomain;
+    }
+
+    detectFileType(url) {
+        if (!url) return 'unknown';
+        const lower = url.toLowerCase();
+        if (lower.includes('.m3u8')) return 'hls';
+        if (lower.includes('.mp4')) return 'mp4';
+        if (lower.includes('.webm')) return 'webm';
+        if (lower.includes('/hls/') || lower.includes('/hls2/')) return 'hls';
+        return 'unknown';
+    }
+
+    extractQuality(html) {
+        const patterns = [
+            /(?:quality|label)["']?\s*[:=]\s*["']?(\d{3,4}p|1080p?|720p?|480p?|360p?)["'?]/i,
+            /(1080p?|720p?|480p?|360p?)/i
+        ];
+        for (const p of patterns) {
+            const match = html.match(p);
+            if (match) return match[1];
+        }
+        return null;
+    }
+
+    extractServerName(url) {
+        try {
+            const hostname = new URL(url).hostname;
+            const serverMap = {
+                'uk-traffic': 'CDN-UK',
+                'cloudflare': 'CloudFlare',
+                'dizipal': 'Main',
+                'youtube': 'YouTube',
+                'vk.com': 'VK',
+                'ok.ru': 'OK'
+            };
+            for (const [key, name] of Object.entries(serverMap)) {
+                if (hostname.includes(key)) return name;
+            }
+            return hostname.split('.')[0];
+        } catch {
+            return 'unknown';
+        }
+    }
+
+    deduplicateSources(sources) {
+        const seen = new Set();
+        return sources.filter(source => {
+            const key = source.url.split('?')[0]; // Query params olmadan kontrol et
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        }).map((source, idx) => ({
+            ...source,
+            id: idx + 1,
+            priority: this.calculatePriority(source)
+        })).sort((a, b) => b.priority - a.priority);
+    }
+
+    calculatePriority(source) {
+        let score = 0;
+        
+        // HLS yüksek öncelikli
+        if (source.type === 'hls') score += 50;
+        if (source.url.includes('master.m3u8')) score += 30;
+        
+        // CDN önceliği
+        if (source.url.includes('uk-traffic')) score += 20;
+        if (source.url.includes('cloudflare')) score += 15;
+        
+        // Kalite bilgisi varsa
+        if (source.quality && source.quality !== 'auto') score += 10;
+        
+        // Server güvenilirliği
+        if (source.server === 'CDN-UK' || source.server === 'Main') score += 25;
+
+        return score;
+    }
+
+    /**
+     * Test fonksiyonu - provider çalışıyor mu kontrol et
+     */
+    async test() {
+        console.log('[Dizipal] Testing provider...');
+        
+        const testUrls = [
+            `${this.baseURL}/bolum/gassal-1-sezon-1-bolum-izle/`,
+            `${this.baseURL}/bolum/gibi-1-sezon-1-bolum-izle/`
+        ];
+
+        for (const url of testUrls) {
+            console.log(`[Dizipal] Testing: ${url}`);
+            const result = await this.getVideoSources(url);
+            
+            if (result.success && result.data.length > 0) {
+                console.log(`✅ Success! Found ${result.data.length} sources:`);
+                result.data.slice(0, 3).forEach((src, i) => {
+                    console.log(`   ${i + 1}. [${src.type}] ${src.quality} - ${src.url.substring(0, 60)}...`);
+                });
+                return true;
+            } else {
+                console.log(`❌ Failed: ${result.error || 'No sources found'}`);
+            }
+        }
+
+        return false;
+    }
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams: getStreams };
-} else {
-  global.getStreams = getStreams;
+// Export
+module.exports = DizipalProvider;
+
+// Eğer doğrudan çalıştırılırsa test et
+if (require.main === module) {
+    const provider = new DizipalProvider();
+    provider.test();
 }
