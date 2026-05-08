@@ -118,7 +118,7 @@
         "movie",
         "tv"
       ],
-      "filename": "providers/dizipal.js",
+      "filename": "providers/dizilla.js",
       "enabled": true,
       "contentLanguage": [
         "tr"
