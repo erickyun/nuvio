@@ -3,7 +3,7 @@
 // ============================================================
 
 var MAIN_URL     = 'https://cizgimax.online';
-var TMDB_API_KEY = '4ef0d7355d9ffb5151e987764708ce96';
+var TMDB_API_KEY = '500330721680edb6d5f7f12ba7cd9023';
 
 var HEADERS = {
   'User-Agent':      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
@@ -356,24 +356,66 @@ function _extractFromEmbed(embedUrl, cookies) {
           subs.push({ label: sub.label.toUpperCase(), url: sub.file });
       });
 
-      if (!videoUrl) { console.log('[CizgiMax] video_location yok'); return null; }
+            if (!videoUrl) { console.log('[CizgiMax] video_location yok'); return null; }
       if (videoUrl.indexOf('/') === 0) videoUrl = 'https://cizgipass100.online' + videoUrl;
+      console.log('[CizgiMax] /list/ fetch ediliyor...');
 
-      console.log('[CizgiMax] ✓ Stream: ' + videoUrl.slice(0, 80));
-
-      return {
-        url:       videoUrl,
-        name:      label,
-        title:     label + (subs.length ? ' | ' + subs.map(function(s){ return s.label; }).join('/') : ''),
-        quality:   'Auto',
-        type:      'hls',
-        headers:   {
-          'Referer': embedUrl,
-          'Cookie':  newCookies,
-          'Origin':  'https://cizgipass100.online'
-        },
-        subtitles: subs
-      };
+      // /list/ master m3u8 fetch et → /m3u/ URL'ini çıkar
+      // /m3u/ sadece Referer ister, cookie gerektirmez
+      return fetch(videoUrl, {
+        headers: {
+          'User-Agent': HEADERS['User-Agent'],
+          'Referer':    embedUrl,
+          'Cookie':     newCookies,
+          'Origin':     'https://cizgipass100.online',
+          'Accept':     '*/*'
+        }
+      })
+        .then(function(r3) {
+          if (!r3.ok) {
+            console.log('[CizgiMax] /list/ ' + r3.status + ' — fallback');
+            return { url: videoUrl, name: label, title: label, quality: 'Auto', type: 'hls',
+                     headers: { 'Referer': embedUrl, 'Cookie': newCookies } };
+          }
+          return r3.text().then(function(m3u8) {
+            var streams = [], lines = m3u8.split('\n');
+            for (var i = 0; i < lines.length; i++) {
+              var line = lines[i].trim();
+              if (line.indexOf('#EXT-X-STREAM-INF') === 0) {
+                var next = (lines[i+1] || '').trim();
+                if (next.indexOf('http') === 0) {
+                  var bw = line.match(/BANDWIDTH=(\d+)/);
+                  var nm = line.match(/NAME="([^"]+)"/);
+                  streams.push({ url: next, bandwidth: bw ? parseInt(bw[1]) : 0, name: nm ? nm[1] : 'Auto' });
+                }
+              }
+            }
+            if (!streams.length) {
+              var dm = m3u8.match(/^(https?:\/\/[^\s]+)$/m);
+              if (dm) streams.push({ url: dm[1], bandwidth: 0, name: 'Auto' });
+            }
+            if (!streams.length) {
+              return { url: videoUrl, name: label, title: label, quality: 'Auto', type: 'hls',
+                       headers: { 'Referer': embedUrl, 'Cookie': newCookies } };
+            }
+            streams.sort(function(a, b) { return b.bandwidth - a.bandwidth; });
+            var best = streams[0];
+            console.log('[CizgiMax] \u2713 Stream: ' + best.url.slice(0, 80));
+            return {
+              url:       best.url,
+              name:      label,
+              title:     label + ' | ' + best.name,
+              quality:   best.name,
+              type:      'hls',
+              headers:   { 'Referer': embedUrl, 'Origin': 'https://cizgipass100.online' },
+              subtitles: subs
+            };
+          });
+        })
+        .catch(function(e) {
+          console.error('[CizgiMax] /list/ hata:', e.message);
+          return null;
+        });
     })
     .catch(function(e) { console.error('[CizgiMax] extractFromEmbed:', e.message); return null; });
 }
@@ -449,5 +491,4 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = { getStreams: getStreams };
 } else {
   global.getStreams = getStreams;
-                                                  }
-            
+}
