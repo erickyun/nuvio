@@ -112,7 +112,7 @@
       "id": "dizipal",
       "name": "dizipal",
       "description": "Türkçe altyazılı ve dublaj yabancı diziler.",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "author": "port: @keyiflerolsun / nuvio: Wekmed",
       "supportedTypes": [
         "movie",
